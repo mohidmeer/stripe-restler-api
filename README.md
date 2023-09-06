@@ -1,6 +1,6 @@
 # stripe-restler-api
 Many functions require data from frontened like getCustomer stripeID which can be obtained from backend via userToken
-## After subscription or checkout Session or customer create you have to add the desired logic to update stripe with database
+## After subscription or checkout Session or customer create you have to add the desired logic to update stripe with your backend database
 ```php
 switch ($event->type) {
             case 'charge.captured':
