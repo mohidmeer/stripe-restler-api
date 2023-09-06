@@ -5,6 +5,7 @@ namespace api;
 
 use Stripe\Customer;
 use Stripe\StripeClient;
+use Stripe\Webhook;
 
 class Stripe {
     public $stripe;
@@ -48,6 +49,8 @@ class Stripe {
         $setupIntent = $this->stripe->setupIntents->create([
             'customer'=>$id,
             'payment_method_types'=>['card'],
+            'usage'=> 'off_session',
+            'use_stripe_sdk'=>'true'
         ]);
         $response = ['ephemeralKey'=>$ephemereal->secret,'setupIntent'=>$setupIntent->client_secret];
         return $response;
@@ -61,7 +64,7 @@ class Stripe {
         $sub = $this->stripe->subscriptions->create([
             'customer' => $request_data['id'],
             'items' => [[
-                'price' =>'price_1NlAG7LRl3FQzHrDmM7De9z9' ,
+                'price' =>'price_1NnHlsLRl3FQzHrDOWalavhs' ,
                  'quantity'=>$request_data['quantity']
             ]],
             'payment_behavior' => 'default_incomplete',
@@ -127,7 +130,7 @@ class Stripe {
 
     function getProducts(){
         $response=[];
-        $products = $this->stripe->products->all(['limit'=>5]);
+        $products = $this->stripe->products->all(['limit'=>8]);
         foreach($products->data as $p){
             $price=$this->stripe->prices->retrieve($p->default_price); 
             $response[]=[
@@ -136,10 +139,154 @@ class Stripe {
                 'image'=>$p->metadata->image,
                 'sku'=>$p->metadata->sku,
                 'stripePriceId'=>$p->default_price,
-                'price'=>$price->unit_amount/100
+                'price'=>$price->unit_amount/100,
+                'category'=>$p->metadata->category,
+                'unit'=>$p->metadata->unit,
             ];
         }
         return $response;
     }
-
+    function getSubscriptionPrice(){
+            $price=$this->stripe->prices->retrieve('price_1NnHlsLRl3FQzHrDOWalavhs'); 
+           
+        return $price->unit_amount/100;
     }
+    
+    function postSubscribeMachine($request_data){
+        $ephemereal=$this->stripe->ephemeralKeys->create(
+            ['customer'=>$request_data['id']],
+            ['stripe_version' => '2023-08-16']
+            );
+        $sub = $this->stripe->subscriptions->create([
+            'customer' => $request_data['id'],
+            'items' => [[
+                'price' =>'price_1NnHlsLRl3FQzHrDOWalavhs' ,
+            ]],
+            'payment_behavior' => 'default_incomplete',
+            'payment_settings' => ['save_default_payment_method' => 'on_subscription'],
+            'expand' => ['latest_invoice.payment_intent'],
+            'metadata' => ['machineLabel'=>$request_data['machineLabel']]
+        ]);
+
+        $response = ['ephemeralKey'=>$ephemereal->secret,'setupIntent'=>$sub->latest_invoice->payment_intent->client_secret];
+        return $response;
+    }
+    /**
+    * 
+    * @param string $label
+     * @url GET machinesubscription/{label}
+    */
+    function getMachinesubscription($label){
+        $quotedLabel = "'" . $label . "'";
+        $response =$this->stripe->subscriptions->search([
+            'query' =>"metadata['machineLabel']:$quotedLabel",
+            'limit'=>1
+          ]);
+        if (count($response->data)==0){
+            $res = [ 
+                'status'=>'new',
+            ];
+            return $res;
+        }
+        if ($response->data[0]->status=='canceled'){
+            $res = [ 
+                'status'=>$response->data[0]->status,
+                'id'=>$response->data[0]->id,
+            ];
+            return $res;
+
+        }
+        $res = [ 
+            'status'=>($response->data[0]->cancellation_details->reason==null) ? $response->data[0]->status : $response->data[0]->cancellation_details->reason,
+            'id'=>$response->data[0]->id,
+        ];
+        return $res;
+    }
+    function getCancelMachineSubscription($id){
+        $res= $this->stripe->subscriptions->update(
+            $id,
+            [
+                'cancel_at_period_end'=> true
+            ]);
+
+        return $res;
+    }
+    function getResumeMachineSubscription($id){
+        $res= $this->stripe->subscriptions->update(
+            $id,
+            [
+                'cancel_at_period_end'=> false
+            ]);
+
+        return $res;
+        return $res;
+    }
+
+    function postStripeWebhook(){
+        $payload = file_get_contents('php://input');
+        $sigHeader = $_SERVER['HTTP_STRIPE_SIGNATURE'];
+        $webhookSecret = 'whsec_Ox6oQRn1GHYkJ0Lb6g6OqmNJxfHVpqS1';
+        try {
+            $event = Webhook::constructEvent($payload, $sigHeader, $webhookSecret);
+        } catch (\UnexpectedValueException $e) {
+            // Invalid payload
+            http_response_code(400);
+            return ['error' => 'Invalid payload'];
+        } catch (\Stripe\Exception\SignatureVerificationException $e) {
+            // Invalid signature
+            http_response_code(400);
+            return ['error' => 'Invalid signature'];
+        }
+        // I included all the events called when stripe calls the webhook for each event you will be given an object of that specific event you can use that object to update
+        // status in database
+        switch ($event->type) {
+            case 'charge.captured':
+              $charge = $event->data->object;
+            //   if you want to collect the payments records for customer for subscritionms and checkout session 
+            case 'charge.failed':
+              $charge = $event->data->object;
+            case 'checkout.session.async_payment_failed':
+              $session = $event->data->object;
+            //   if payment fails for any reasson
+            case 'checkout.session.async_payment_succeeded':
+              $session = $event->data->object;
+            //   if payment succedes then you obtain the shipping address items and quantity 
+            case 'checkout.session.completed':
+              $session = $event->data->object;
+            // case 'checkout.session.expired':
+            //   $session = $event->data->object;
+            case 'customer.created':
+              $customer = $event->data->object;
+            //   here you might want to save the stripe customerID to database for latter use if customer is created successfully 
+            case 'customer.subscription.created':
+              $subscription = $event->data->object;
+            //   here you will get the machineLabel from {$subscription->metadata->machineLabel}
+            //  you want to udpadte the machine status 
+            case 'customer.subscription.deleted': 
+              $subscription = $event->data->object;
+            case 'customer.subscription.pending_update_applied':
+              $subscription = $event->data->object;
+            case 'customer.subscription.pending_update_expired':
+              $subscription = $event->data->object;
+            // case 'setup_intent.canceled':
+            // $setupIntent = $event->data->object;
+            // case 'setup_intent.created':
+            // $setupIntent = $event->data->object;
+            // case 'setup_intent.requires_action':
+            // $setupIntent = $event->data->object;
+            // case 'setup_intent.setup_failed':
+            // $setupIntent = $event->data->object;
+            case 'setup_intent.succeeded':
+            $setupIntent = $event->data->object;
+              // here you want to save in database if user paayment is saved
+            default:
+              echo 'Received unknown event type ' . $event->type;
+          }
+        
+        // Respond with a success status code
+        http_response_code(200);
+        return ['message' => 'Webhook event processed successfully'];
+    }
+    
+    }
+  
